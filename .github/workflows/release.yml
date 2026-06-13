@@ -1,0 +1,71 @@
+name: Build and Publish to R2
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build binary
+        run: |
+          mkdir -p install/bin
+          gcc -o install/bin/hello src/hello.c
+
+      - name: Create metadata.json
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          cat > metadata.json <<EOF
+          {
+            "name": "hello",
+            "version": "$VERSION",
+            "architecture": "x86_64",
+            "dependencies": []
+          }
+          EOF
+
+      - name: Package as .homl (tar.xz)
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          tar -cJf hello-${VERSION}-linux-x86_64.homl metadata.json install/
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          # 使用 AWS CLI 兼容模式上传
+          aws s3 cp hello-${VERSION}-linux-x86_64.homl \
+            s3://${{ secrets.R2_BUCKET_NAME }}/packages/hello/hello-${VERSION}-linux-x86_64.homl \
+            --endpoint-url $AWS_ENDPOINT_URL
+
+      - name: Update index.yaml on R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
+          PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+          BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          # 安装 yq 和 jq
+          sudo snap install yq
+          VERSION=${GITHUB_REF_NAME#v}
+          PACKAGE=hello
+          ARCH=x86_64
+          DOWNLOAD_URL="${PUBLIC_URL}/packages/${PACKAGE}/${PACKAGE}-${VERSION}-${ARCH}.homl"
+          SHA256=$(sha256sum hello-${VERSION}-${ARCH}.homl | cut -d' ' -f1)
+
+          # 下载现有 index.yaml（如果不存在则新建）
+          aws s3 cp s3://${BUCKET}/index.yaml ./index.yaml --endpoint-url $AWS_ENDPOINT_URL || echo "{}" > index.yaml
+
+          # 用 yq 添加/更新条目
+          yq eval ".packages.\"${PACKAGE}\".versions.\"${VERSION}\" = {\"download_url\": \"${DOWNLOAD_URL}\", \"checksum\": \"sha256:${SHA256}\", \"architecture\": \"${ARCH}\"}" -i index.yaml
+
+          # 上传回 R2
+          aws s3 cp index.yaml s3://${BUCKET}/index.yaml --endpoint-url $AWS_ENDPOINT_URL
