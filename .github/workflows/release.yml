@@ -1,4 +1,4 @@
-name: Build AppImage and Publish to R2
+name: Build and Publish hello Package
 
 on:
   push:
@@ -10,88 +10,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 安装依赖
-      - name: Install dependencies
+      - name: Build static binary
         run: |
-          sudo apt update
-          sudo apt install -y libfuse2 wget file
+          gcc -static -o hello src/hello.c
 
-      # 下载 appimagetool
-      - name: Download appimagetool
-        run: |
-          wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool-x86_64.AppImage
-
-      # 构建二进制
-      - name: Build binary
-        run: |
-          mkdir -p AppDir/usr/bin
-          gcc -o AppDir/usr/bin/hello src/hello.c
-
-      # 创建 AppRun 和 .desktop 文件
-      - name: Prepare AppDir
-  run: |
-    cat > AppDir/AppRun << 'EOF'
-    #!/bin/bash
-    SELF=$(readlink -f "$0")
-    HERE=${SELF%/*}
-    exec "$HERE/usr/bin/hello" "$@"
-    EOF
-    chmod +x AppDir/AppRun
-    
-    cat > AppDir/hello.desktop << 'EOF'
-    [Desktop Entry]
-    Name=Hello
-    Exec=hello
-    Type=Application
-    Categories=Utility;
-    EOF
-    
-    touch AppDir/hello.png
-
-      # 打包成 AppImage
-      - name: Build AppImage
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          ARCH=x86_64
-          ./appimagetool-x86_64.AppImage AppDir hello-${VERSION}-${ARCH}.AppImage
-
-      # 计算 SHA256
       - name: Compute SHA256
         id: sha
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "sha256=$(sha256sum hello-${VERSION}-x86_64.AppImage | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "sha256=$(sha256sum hello | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
-      # 上传到 R2
-      - name: Upload to R2
+      - name: Upload binary to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          aws s3 cp hello-${VERSION}-x86_64.AppImage \
-            s3://${{ secrets.R2_BUCKET_NAME }}/packages/hello/hello-${VERSION}-x86_64.AppImage \
-            --endpoint-url $AWS_ENDPOINT_URL
+          aws s3 cp hello s3://${{ secrets.R2_BUCKET_NAME }}/packages/hello/hello-${VERSION} --endpoint-url $AWS_ENDPOINT_URL
 
-      # 更新 index.yaml
-      - name: Update index.yaml on R2
+      - name: Update index.yaml and sign
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
           PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
           BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          PRIVATE_KEY: ${{ secrets.SIGN_PRIVATE_KEY }}
         run: |
           sudo snap install yq
           VERSION=${GITHUB_REF_NAME#v}
-          PACKAGE=hello
+          DOWNLOAD_URL="${PUBLIC_URL}/packages/hello/hello-${VERSION}"
           SHA256="${{ steps.sha.outputs.sha256 }}"
-          DOWNLOAD_URL="${PUBLIC_URL}/packages/hello/hello-${VERSION}-x86_64.AppImage"
 
+          # 下载现有索引
           aws s3 cp s3://${BUCKET}/index.yaml ./index.yaml --endpoint-url $AWS_ENDPOINT_URL || echo "{}" > index.yaml
-          
-          yq eval ".packages.\"${PACKAGE}\".versions.\"${VERSION}\" = {\"download_url\": \"${DOWNLOAD_URL}\", \"checksum\": \"sha256:${SHA256}\", \"architecture\": \"x86_64\"}" -i index.yaml
-          
+
+          # 更新 yaml
+          yq eval ".packages.hello.versions.\"${VERSION}\" = {\"download_url\": \"${DOWNLOAD_URL}\", \"checksum\": \"sha256:${SHA256}\", \"architecture\": \"x86_64\"}" -i index.yaml
+
+          # 上传新索引
           aws s3 cp index.yaml s3://${BUCKET}/index.yaml --endpoint-url $AWS_ENDPOINT_URL
+
+          # 签名
+          echo "$PRIVATE_KEY" > private.key
+          minisign -S -s private.key -m index.yaml -x index.yaml.sig
+          rm private.key
+          aws s3 cp index.yaml.sig s3://${BUCKET}/index.yaml.sig --endpoint-url $AWS_ENDPOINT_URL
