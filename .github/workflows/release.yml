@@ -30,24 +30,24 @@ jobs:
 
       # 创建 AppRun 和 .desktop 文件
       - name: Prepare AppDir
-        run: |
-          cat > AppDir/AppRun << 'EOF'
-          #!/bin/bash
-          SELF=$(readlink -f "$0")
-          HERE=${SELF%/*}
-          exec "$HERE/usr/bin/hello" "$@"
-          EOF
-          chmod +x AppDir/AppRun
-          
-          cat > AppDir/hello.desktop << 'EOF'
-          [Desktop Entry]
-          Name=Hello
-          Exec=hello
-          Type=Application
-          EOF
-          
-          # 可选：复制图标（这里省略，可以放一个占位）
-          touch AppDir/hello.png
+  run: |
+    cat > AppDir/AppRun << 'EOF'
+    #!/bin/bash
+    SELF=$(readlink -f "$0")
+    HERE=${SELF%/*}
+    exec "$HERE/usr/bin/hello" "$@"
+    EOF
+    chmod +x AppDir/AppRun
+    
+    cat > AppDir/hello.desktop << 'EOF'
+    [Desktop Entry]
+    Name=Hello
+    Exec=hello
+    Type=Application
+    Categories=Utility;
+    EOF
+    
+    touch AppDir/hello.png
 
       # 打包成 AppImage
       - name: Build AppImage
