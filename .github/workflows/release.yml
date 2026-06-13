@@ -1,4 +1,4 @@
-name: Build and Publish to R2
+name: Build AppImage and Publish to R2
 
 on:
   push:
@@ -10,36 +10,60 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 安装依赖
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y libfuse2 wget file
+
+      # 下载 appimagetool
+      - name: Download appimagetool
+        run: |
+          wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+      # 构建二进制
       - name: Build binary
         run: |
-          mkdir -p install/bin
-          gcc -o install/bin/hello src/hello.c
+          mkdir -p AppDir/usr/bin
+          gcc -o AppDir/usr/bin/hello src/hello.c
 
-      - name: Create metadata.json
+      # 创建 AppRun 和 .desktop 文件
+      - name: Prepare AppDir
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          cat > metadata.json <<EOF
-          {
-            "name": "hello",
-            "version": "$VERSION",
-            "architecture": "x86_64",
-            "dependencies": []
-          }
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          exec "$HERE/usr/bin/hello" "$@"
           EOF
+          chmod +x AppDir/AppRun
+          
+          cat > AppDir/hello.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Hello
+          Exec=hello
+          Type=Application
+          EOF
+          
+          # 可选：复制图标（这里省略，可以放一个占位）
+          touch AppDir/hello.png
 
-      # --- 关键修改：统一打包命令 ---
-      - name: Package as .homl (tar.xz)
+      # 打包成 AppImage
+      - name: Build AppImage
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          # 统一命名为：包名-版本-架构.homl
-          tar -cJf hello-${VERSION}-x86_64.homl metadata.json install/
+          ARCH=x86_64
+          ./appimagetool-x86_64.AppImage AppDir hello-${VERSION}-${ARCH}.AppImage
 
+      # 计算 SHA256
       - name: Compute SHA256
         id: sha
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          echo "sha256=$(sha256sum hello-${VERSION}-x86_64.homl | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "sha256=$(sha256sum hello-${VERSION}-x86_64.AppImage | cut -d' ' -f1)" >> $GITHUB_OUTPUT
 
+      # 上传到 R2
       - name: Upload to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -47,11 +71,11 @@ jobs:
           AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          # 上传路径同步更新
-          aws s3 cp hello-${VERSION}-x86_64.homl \
-            s3://${{ secrets.R2_BUCKET_NAME }}/packages/hello/hello-${VERSION}-x86_64.homl \
+          aws s3 cp hello-${VERSION}-x86_64.AppImage \
+            s3://${{ secrets.R2_BUCKET_NAME }}/packages/hello/hello-${VERSION}-x86_64.AppImage \
             --endpoint-url $AWS_ENDPOINT_URL
 
+      # 更新 index.yaml
       - name: Update index.yaml on R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -63,14 +87,11 @@ jobs:
           sudo snap install yq
           VERSION=${GITHUB_REF_NAME#v}
           PACKAGE=hello
-          SHA256="${{ steps.sha.outputs.sha256 }}"  # 从上面步骤获取 SHA256
-          DOWNLOAD_URL="${PUBLIC_URL}/packages/hello/hello-${VERSION}-x86_64.homl"
+          SHA256="${{ steps.sha.outputs.sha256 }}"
+          DOWNLOAD_URL="${PUBLIC_URL}/packages/hello/hello-${VERSION}-x86_64.AppImage"
 
-          # 下载现有 index.yaml
           aws s3 cp s3://${BUCKET}/index.yaml ./index.yaml --endpoint-url $AWS_ENDPOINT_URL || echo "{}" > index.yaml
           
-          # 更新索引，现在 checksum 有正确的值了
           yq eval ".packages.\"${PACKAGE}\".versions.\"${VERSION}\" = {\"download_url\": \"${DOWNLOAD_URL}\", \"checksum\": \"sha256:${SHA256}\", \"architecture\": \"x86_64\"}" -i index.yaml
           
-          # 上传更新后的索引
           aws s3 cp index.yaml s3://${BUCKET}/index.yaml --endpoint-url $AWS_ENDPOINT_URL
